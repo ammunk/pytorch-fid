@@ -38,6 +38,7 @@ from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
 import numpy as np
 import torch
+from torch.utils.data import IterableDataset, DataLoader
 from scipy import linalg
 from torch.nn.functional import adaptive_avg_pool2d
 
@@ -52,7 +53,7 @@ except ImportError:
 from inception import InceptionV3
 
 parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
-parser.add_argument('path', type=str, nargs=2,
+parser.add_argument('--path', type=str, nargs=2, default='',
                     help=('Path to the generated images or '
                           'to .npz statistic files'))
 parser.add_argument('--batch-size', type=int, default=50,
@@ -63,6 +64,45 @@ parser.add_argument('--dims', type=int, default=2048,
                           'By default, uses pool3 features'))
 parser.add_argument('-c', '--gpu', default='', type=str,
                     help='GPU to use (leave blank for CPU only)')
+
+
+class FakeData(IterableDataset):
+    """
+    Make sure that the number of samples (N) is a multiple of
+    the batch size, otherwise some samples are ignored. This
+    behavior is retained to match the original FID score
+    implementation.
+    """
+
+    def __init__(self, p, N=1000, batch_size=32):
+
+        self.p = p
+        self.N = N
+        self.number_sampled = 0
+        self.batch_size = batch_size
+        self.sample_shape = torch.Size([batch_size])
+
+    def __iter__(self):
+
+        self.number_sampled = 0
+        return self
+
+    def __next__(self):
+
+        if self.number_sampled + self.batch_size < self.N:
+            self.number_sampled += self.batch_size
+            return self.p.sample(torch.Size([self.batch_size]))
+        else:
+            raise StopIteration
+
+    def __len__(self):
+        return self.N
+
+
+def collate_fn(data):
+    # Ensure data has shape (3xHxW)
+    data = data[0]
+    return data.expand(-1, 3, *data.shape[2:])
 
 
 def imread(filename):
@@ -131,6 +171,44 @@ def get_activations(files, model, batch_size=50, dims=2048,
 
     if verbose:
         print(' done')
+
+    return pred_arr
+
+
+def get_activations_dataloader(dataloader, model, dims=2048, cuda=False):
+    """Calculates the activations of the pool_3 layer for all images.
+
+    Params:
+    -- dataloader  : Dataloader from which to get activations
+    -- model       : Instance of inception model
+    -- dims        : Dimensionality of features returned by Inception
+    -- cuda        : If set to True, use GPU
+    Returns:
+    -- A numpy array of dimension (num images, dims) that contains the
+       activations of the given tensor when feeding inception with the
+       query tensor.
+    """
+    model.eval()
+
+    pred_arr = np.empty((len(dataloader), dims))
+    for i, batch in tqdm(enumerate(dataloader)):
+
+        if type(batch) == tuple:
+            batch = batch[0]
+
+        if cuda:
+            batch = batch.cuda()
+
+        pred = model(batch)[0]
+
+        start = i
+        end = i + batch.size(0)
+        # If model output is not scalar, apply global spatial average pooling.
+        # This happens if you choose a dimensionality not equal 2048.
+        if pred.size(2) != 1 or pred.size(3) != 1:
+            pred = adaptive_avg_pool2d(pred, output_size=(1, 1))
+
+        pred_arr[start:end] = pred.cpu().data.numpy().reshape(pred.size(0), -1)
 
     return pred_arr
 
@@ -217,6 +295,26 @@ def calculate_activation_statistics(files, model, batch_size=50,
     return mu, sigma
 
 
+def calculate_activation_statistics_dataloader(dataloader, model, dims=2048,
+                                               cuda=False):
+    """Calculation of the statistics used by the FID.
+    Params:
+    -- dataloader  : Dataloader from which to calculate statistics
+    -- model       : Instance of inception model
+    -- dims        : Dimensionality of features returned by Inception
+    -- cuda        : If set to True, use GPU
+    Returns:
+    -- mu    : The mean over samples of the activations of the pool_3 layer of
+               the inception model.
+    -- sigma : The covariance matrix of the activations of the pool_3 layer of
+               the inception model.
+    """
+    act = get_activations_dataloader(dataloader, model, dims, cuda)
+    mu = np.mean(act, axis=0)
+    sigma = np.cov(act, rowvar=False)
+    return mu, sigma
+
+
 def _compute_statistics_of_path(path, model, batch_size, dims, cuda):
     if path.endswith('.npz'):
         f = np.load(path)
@@ -252,12 +350,78 @@ def calculate_fid_given_paths(paths, batch_size, cuda, dims):
     return fid_value
 
 
+def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims):
+
+    block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
+
+    model = InceptionV3([block_idx])
+    if cuda:
+        model.cuda()
+
+    # Set up dataloader for generator
+    # (note we manually handle batch size in the dataset!!)
+    dataloader_gen = DataLoader(FakeData(generator, len(dataset), batch_size),
+                                collate_fn=collate_fn, batch_size=1)
+    # Set up dataloader for dataset
+    # (note we do not manually handle batch size here!)
+    dataloader_gt = DataLoader(dataset, collate_fn=collate_fn,
+                               batch_size=batch_size)
+
+    m1, s1 = calculate_activation_statistics_dataloader(dataloader_gen, model,
+                                                        dims, cuda)
+    m2, s2 = calculate_activation_statistics_dataloader(dataloader_gt, model,
+                                                        dims, cuda)
+    fid_value = calculate_frechet_distance(m1, s1, m2, s2)
+
+    return fid_value
+
+
 if __name__ == '__main__':
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
-    fid_value = calculate_fid_given_paths(args.path,
-                                          args.batch_size,
-                                          args.gpu != '',
-                                          args.dims)
+    paths = args.path
+    batch_size = args.batch_size
+    cuda = args.gpu != ''
+    dims = args.dims
+
+    if '' not in paths:
+        fid_value = calculate_fid_given_paths(paths, batch_size, cuda, dims)
+    else:
+        import torch.nn as nn
+        from torch.nn import functional as F
+        from torch.distributions import Normal
+        from torchvision import datasets as torch_dataset, transforms
+
+        class Test_Generator(nn.Module):
+
+            LATENT_DIM = 4
+
+            def __init__(self):
+                super().__init__()
+                self.ff = nn.Sequential(
+                    nn.Linear(self.LATENT_DIM, 4*4),
+                    nn.ReLU(True),
+                )
+                self.mean = nn.Parameter(torch.zeros(self.LATENT_DIM),
+                                         requires_grad=False)
+                self.std = nn.Parameter(torch.ones(self.LATENT_DIM),
+                                        requires_grad=False)
+                self._style_sampler = Normal(self.mean, self.std)
+
+            def sample(self, batch_shape=torch.Size([1])):
+                styles = self._style_sampler.sample(batch_shape)
+                return self(styles)
+
+            def forward(self, x):
+                return F.sigmoid(self.ff(x).view(x.size(0), 1, 4, 4))
+
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+        ])
+        test_dataset = torch_dataset.MNIST('.', download=True, train=False,
+                                           transform=transform)
+        fid_value = calculate_fid_no_paths(Test_Generator(), test_dataset,
+                                           batch_size, cuda, dims)
+
     print('FID: ', fid_value)
