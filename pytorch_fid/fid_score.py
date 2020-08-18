@@ -389,7 +389,7 @@ def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims, N):
     return fid_value
 
 
-if __name__ == '__main__':
+def main():
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -435,6 +435,10 @@ if __name__ == '__main__':
         test_dataset = torch_dataset.MNIST('.', download=True, train=False,
                                            transform=transform)
         fid_value = calculate_fid_no_paths(Test_Generator(), test_dataset,
-                                           batch_size, cuda, dims)
+                                           batch_size, cuda, dims,
+                                           len(test_dataset))
 
     print('FID: ', fid_value)
+
+if __name__ == '__main__':
+    main()
