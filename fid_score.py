@@ -50,7 +50,7 @@ except ImportError:
     # If not tqdm is not available, provide a mock version of it
     def tqdm(x): return x
 
-from inception import InceptionV3
+from .inception import InceptionV3
 
 parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
 parser.add_argument('--path', type=str, nargs=2, default='',
@@ -100,8 +100,15 @@ class FakeData(IterableDataset):
 
 
 def collate_fn(data):
-    # Ensure data has shape (3xHxW)
     data = data[0]
+    # Ensure data has shape (3xHxW)
+    return data.expand(-1, 3, *data.shape[2:])
+
+
+def collate_fn_real_data(data):
+    data, target = zip(*data)
+    data = torch.stack(data)
+    # Ensure data has shape (3xHxW)
     return data.expand(-1, 3, *data.shape[2:])
 
 
@@ -142,10 +149,7 @@ def get_activations(files, model, batch_size=50, dims=2048,
 
     pred_arr = np.empty((len(files), dims))
 
-    for i in tqdm(range(0, len(files), batch_size)):
-        if verbose:
-            print('\rPropagating batch %d/%d' % (i + 1, n_batches),
-                  end='', flush=True)
+    for i in tqdm(range(0, len(files), batch_size), desc="Fid Score"):
         start = i
         end = i + batch_size
 
@@ -175,12 +179,13 @@ def get_activations(files, model, batch_size=50, dims=2048,
     return pred_arr
 
 
-def get_activations_dataloader(dataloader, model, dims=2048, cuda=False):
+def get_activations_dataloader(dataloader, model, N, dims=2048, cuda=False):
     """Calculates the activations of the pool_3 layer for all images.
 
     Params:
     -- dataloader  : Dataloader from which to get activations
     -- model       : Instance of inception model
+    -- N           : Number of samples to use for the estimate
     -- dims        : Dimensionality of features returned by Inception
     -- cuda        : If set to True, use GPU
     Returns:
@@ -190,8 +195,15 @@ def get_activations_dataloader(dataloader, model, dims=2048, cuda=False):
     """
     model.eval()
 
-    pred_arr = np.empty((len(dataloader), dims))
-    for i, batch in tqdm(enumerate(dataloader)):
+    pred_arr = np.empty((N, dims))
+    n = 0
+    batch_size = next(iter(dataloader)).size(0)
+    for i, batch in tqdm(enumerate(dataloader),
+                         total=N//batch_size,
+                         desc="Fid Score"):
+        n += batch.size(0)
+        if n > N:
+            break
 
         if type(batch) == tuple:
             batch = batch[0]
@@ -295,12 +307,13 @@ def calculate_activation_statistics(files, model, batch_size=50,
     return mu, sigma
 
 
-def calculate_activation_statistics_dataloader(dataloader, model, dims=2048,
+def calculate_activation_statistics_dataloader(dataloader, model, N, dims=2048,
                                                cuda=False):
     """Calculation of the statistics used by the FID.
     Params:
     -- dataloader  : Dataloader from which to calculate statistics
     -- model       : Instance of inception model
+    -- N           : Number of samples to use for the estimate
     -- dims        : Dimensionality of features returned by Inception
     -- cuda        : If set to True, use GPU
     Returns:
@@ -309,7 +322,7 @@ def calculate_activation_statistics_dataloader(dataloader, model, dims=2048,
     -- sigma : The covariance matrix of the activations of the pool_3 layer of
                the inception model.
     """
-    act = get_activations_dataloader(dataloader, model, dims, cuda)
+    act = get_activations_dataloader(dataloader, model, N, dims, cuda)
     mu = np.mean(act, axis=0)
     sigma = np.cov(act, rowvar=False)
     return mu, sigma
@@ -350,7 +363,7 @@ def calculate_fid_given_paths(paths, batch_size, cuda, dims):
     return fid_value
 
 
-def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims):
+def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims, N):
 
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
 
@@ -362,15 +375,19 @@ def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims):
     # (note we manually handle batch size in the dataset!!)
     dataloader_gen = DataLoader(FakeData(generator, len(dataset), batch_size),
                                 collate_fn=collate_fn, batch_size=1)
+
     # Set up dataloader for dataset
     # (note we do not manually handle batch size here!)
-    dataloader_gt = DataLoader(dataset, collate_fn=collate_fn,
-                               batch_size=batch_size)
+    dataloader_gt = DataLoader(dataset, collate_fn=collate_fn_real_data,
+                               batch_size=batch_size, shuffle=True)
 
     m1, s1 = calculate_activation_statistics_dataloader(dataloader_gen, model,
+                                                        N, dims, cuda)
+
+    m2, s2 = calculate_activation_statistics_dataloader(dataloader_gt, model, N,
                                                         dims, cuda)
-    m2, s2 = calculate_activation_statistics_dataloader(dataloader_gt, model,
-                                                        dims, cuda)
+
+
     fid_value = calculate_frechet_distance(m1, s1, m2, s2)
 
     return fid_value
