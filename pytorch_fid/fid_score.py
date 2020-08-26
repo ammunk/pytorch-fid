@@ -359,11 +359,12 @@ def calculate_fid_given_paths(paths, batch_size, cuda, dims):
     return fid_value
 
 
-def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims, N):
+def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims, N,
+                           normalize_input=True):
 
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
 
-    model = InceptionV3([block_idx])
+    model = InceptionV3([block_idx], normalize_input=normalize_input)
     if cuda:
         model.cuda()
 
