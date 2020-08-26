@@ -192,9 +192,10 @@ def get_activations_dataloader(dataloader, model, N, dims=2048, cuda=False):
     """
     model.eval()
 
+    batch_size = next(iter(dataloader)).size(0)
+    N = N - N % batch_size
     pred_arr = np.empty((N, dims))
     n = 0
-    batch_size = next(iter(dataloader)).size(0)
     for i, batch in tqdm(enumerate(dataloader),
                          total=N//batch_size,
                          desc="Fid Score"):
@@ -210,15 +211,14 @@ def get_activations_dataloader(dataloader, model, N, dims=2048, cuda=False):
 
         pred = model(batch)[0]
 
-        start = i
-        end = i + batch.size(0)
+        start = i*batch_size
+        end = start+batch_size
         # If model output is not scalar, apply global spatial average pooling.
         # This happens if you choose a dimensionality not equal 2048.
         if pred.size(2) != 1 or pred.size(3) != 1:
             pred = adaptive_avg_pool2d(pred, output_size=(1, 1))
 
         pred_arr[start:end] = pred.cpu().data.numpy().reshape(pred.size(0), -1)
-
     return pred_arr
 
 
@@ -382,7 +382,6 @@ def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims, N):
 
     m2, s2 = calculate_activation_statistics_dataloader(dataloader_gt, model, N,
                                                         dims, cuda)
-
 
     fid_value = calculate_frechet_distance(m1, s1, m2, s2)
 
