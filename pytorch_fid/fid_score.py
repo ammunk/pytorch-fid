@@ -34,6 +34,7 @@ limitations under the License.
 import os
 import pathlib
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+import zlib
 
 import numpy as np
 import torch
@@ -381,8 +382,17 @@ def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims, N,
     m1, s1 = calculate_activation_statistics_dataloader(dataloader_gen, model,
                                                         N, dims, cuda)
 
-    m2, s2 = calculate_activation_statistics_dataloader(dataloader_gt, model, N,
-                                                        dims, cuda)
+    # check if we have saved m2 and s2
+    dataset_type = type(dataset).__name__
+    dataset_hash = zlib.adler32(repr(dataset).encode('utf-8'))
+    fname = f"./.{dataset_type}_moments_{dataset_hash}.npz"
+    if not os.path.exists(fname):
+        m2, s2 = calculate_activation_statistics_dataloader(dataloader_gt, model, N,
+                                                            dims, cuda)
+        np.savez(fname, m2=m2, s2=s2)
+    npz = np.load(fname)
+    m2 = npz['m2']
+    s2 = npz['s2']
 
     fid_value = calculate_frechet_distance(m1, s1, m2, s2)
 
