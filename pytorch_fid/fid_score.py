@@ -384,11 +384,12 @@ def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims, N,
 
     # check if we have saved m2 and s2
     dataset_type = type(dataset).__name__
-    dataset_hash = zlib.adler32(repr(dataset).encode('utf-8'))
-    fname = f"./{dataset_type}_moments_{dataset_hash}.npz"
+    # dataset_hash = zlib.adler32(repr(dataset).encode('utf-8'))
+    fname = f"./{dataset_type}_moments.npz"
     if not os.path.exists(fname):
-        m2, s2 = calculate_activation_statistics_dataloader(dataloader_gt, model, N,
-                                                            dims, cuda)
+        m2, s2 = calculate_activation_statistics_dataloader(dataloader_gt,
+                                                            model, N, dims,
+                                                            cuda)
         np.savez(fname, m2=m2, s2=s2)
     npz = np.load(fname)
     m2 = npz['m2']
