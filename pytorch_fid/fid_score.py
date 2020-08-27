@@ -388,8 +388,9 @@ def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims, N,
     fname = f"./{dataset_type}_moments.npz"
     if not os.path.exists(fname):
         m2, s2 = calculate_activation_statistics_dataloader(dataloader_gt,
-                                                            model, N, dims,
-                                                            cuda)
+                                                            model,
+                                                            len(dataloader_gt),
+                                                            dims, cuda)
         np.savez(fname, m2=m2, s2=s2)
     npz = np.load(fname)
     m2 = npz['m2']
