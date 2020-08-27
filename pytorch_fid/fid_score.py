@@ -99,7 +99,7 @@ class FakeData(IterableDataset):
             raise StopIteration
 
     def __len__(self):
-        return self.N
+        return self.N - self.N % self.batch_size
 
 
 def collate_fn(data):
