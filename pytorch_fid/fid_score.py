@@ -32,6 +32,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import os
+import math
 import pathlib
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import zlib
@@ -77,9 +78,9 @@ class FakeData(IterableDataset):
     implementation.
     """
 
-    def __init__(self, p, N=1000, batch_size=32):
+    def __init__(self, generator, N=1000, batch_size=32):
 
-        self.p = p
+        self.generator = generator
         self.N = N
         self.number_sampled = 0
         self.batch_size = batch_size
@@ -92,14 +93,15 @@ class FakeData(IterableDataset):
 
     def __next__(self):
 
-        if self.number_sampled + self.batch_size < self.N:
-            self.number_sampled += self.batch_size
-            return self.p.sample(torch.Size([self.batch_size]))
+        if self.number_sampled < self.N:
+            batch_size = min(self.batch_size, self.N-self.number_sampled)
+            self.number_sampled += batch_size
+            return self.generator.sample(torch.Size([batch_size]))
         else:
             raise StopIteration
 
     def __len__(self):
-        return self.N - self.N % self.batch_size
+        return math.ceil(self.N / self.batch_size)
 
 
 def collate_fn(data):
@@ -193,16 +195,12 @@ def get_activations_dataloader(dataloader, model, N, dims=2048, cuda=False):
     """
     model.eval()
 
-    batch_size = next(iter(dataloader)).size(0)
-    N = N - N % batch_size
     pred_arr = np.empty((N, dims))
-    n = 0
-    for i, batch in tqdm(enumerate(dataloader),
-                         total=N//batch_size,
-                         desc="Fid Score"):
-        n += batch.size(0)
-        if n > N:
-            break
+    end = 0
+    for batch in tqdm(dataloader,
+                      total=len(dataloader),
+                      desc="Fid Score"):
+        batch_size = batch.size(0)
 
         if type(batch) == tuple:
             batch = batch[0]
@@ -212,7 +210,7 @@ def get_activations_dataloader(dataloader, model, N, dims=2048, cuda=False):
 
         pred = model(batch)[0]
 
-        start = i*batch_size
+        start = end
         end = start+batch_size
         # If model output is not scalar, apply global spatial average pooling.
         # This happens if you choose a dimensionality not equal 2048.
@@ -371,7 +369,8 @@ def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims, N,
 
     # Set up dataloader for generator
     # (note we manually handle batch size in the dataset!!)
-    dataloader_gen = DataLoader(FakeData(generator, len(dataset), batch_size),
+    dataloader_gen = DataLoader(FakeData(generator, N,
+                                         min(batch_size, N)),
                                 collate_fn=collate_fn, batch_size=1)
 
     # Set up dataloader for dataset
@@ -389,7 +388,7 @@ def calculate_fid_no_paths(generator, dataset, batch_size, cuda, dims, N,
     if not os.path.exists(fname):
         m2, s2 = calculate_activation_statistics_dataloader(dataloader_gt,
                                                             model,
-                                                            len(dataloader_gt),
+                                                            len(dataset),
                                                             dims, cuda)
         np.savez(fname, m2=m2, s2=s2)
     npz = np.load(fname)
